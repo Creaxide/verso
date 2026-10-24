@@ -3,9 +3,12 @@
 pub mod csv;
 pub mod docx;
 pub mod html;
+pub mod image;
+pub mod image_pdf;
 pub mod json;
 pub mod markdown;
 pub mod pdf;
+pub mod pdf_image;
 pub mod rtf;
 pub mod txt;
 

@@ -5,8 +5,8 @@ open the result. Nothing is uploaded and the source file is never changed.
 
 Verso is one native binary for Windows, macOS and Linux, built with Rust and
 [egui/eframe](https://github.com/emilk/egui). It converts between **TXT, MD, HTML, DOCX,
-PDF, RTF, JSON and CSV**, warns before a lossy pair, and reports what the target could not
-keep after the conversion.
+PDF, RTF, JSON, CSV, PNG, JPG, WEBP, BMP and GIF**, warns before a lossy pair, and reports
+what the target could not keep after the conversion.
 
 ## Format support
 
@@ -23,9 +23,24 @@ Legend: **●** native (structure kept) · **◐** supported with a stated loss 
 | **JSON**  | ●   | ●   | ●    | ●    | ◐   | ◐   | ●    | ◐   |
 | **CSV**   | ●   | ●   | ●    | ●    | ●   | ●   | ●    | ●   |
 
-PDF → CSV is the only pair Verso refuses: a PDF stores positioned glyphs, not columns, so
-table structure cannot be recovered reliably. The matrix is also available in the app
-(`Ctrl+M`), where every cell explains its cost on hover.
+PDF → CSV is the only document pair Verso refuses: a PDF stores positioned glyphs, not
+columns, so table structure cannot be recovered reliably. The matrix is also available in
+the app (`Ctrl+M`), where every cell explains its cost on hover.
+
+### Images
+
+PNG, JPG, WEBP, BMP and GIF convert among themselves. PDF is the bridge to documents:
+
+- **PDF → PNG/JPG** rasterizes each page (72–300 DPI, 150 default) into
+  `<stem>_pages/<stem>_page-001.png`, or one `<stem>_pages.zip`.
+- **Image → PDF** places one image per page, sized to the image or fitted to
+  A4/Letter/Legal. JPEG bytes are embedded directly unless a resize is requested.
+- A batch of images can become one PDF (one per page) or one PDF per image.
+- Document ↔ image beyond PDF is not available.
+
+PDF → image needs [PDFium](https://github.com/bblanchon/pdfium-binaries/releases). Put
+`pdfium.dll` beside the executable, on `PATH`, or point `VERSO_PDFIUM_PATH` at it. The core
+can also be built without the renderer: `cargo build -p verso-core --no-default-features`.
 
 ## Build and run
 
@@ -157,6 +172,14 @@ drop content silently.
 
 ## Known limitations
 
+- **Images are raster.** GIF animation is not preserved; only the first frame is read.
+  JPG and WEBP output re-encode, so quality below 100 adds another generation of
+  compression. JPG and BMP output flatten transparency onto white.
+- **PDF → image is a raster.** Pages are rendered at the chosen DPI; text stops being
+  selectable. The base install does not bundle PDFium, so the app explains where to get it
+  instead of failing silently.
+- **Image → PDF keeps each image on its own page.** There is no flow layout, captioning or
+  mixed text-and-image page.
 - **PDF input is text-first.** `pdf-extract` returns positioned text, so headings, lists
   and tables come back as paragraphs; the loss is stated in the UI. A PDF with no text layer
   (a scan) is refused with an explanation rather than exported as an empty file.

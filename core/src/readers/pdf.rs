@@ -986,13 +986,13 @@ impl Reader for PdfReader {
         let pages = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pdf_extract::extract_text_from_mem_by_pages(input)
         }))
-        .map_err(|_| ConvertError::PdfUnreadable)?
+        .map_err(|_| classify_pdf_failure(input))?
         .map_err(|error| {
             let message = error.to_string().to_ascii_lowercase();
             if message.contains("encrypt") || message.contains("password") {
                 ConvertError::PdfUnreadable
             } else {
-                ConvertError::parse(Format::Pdf, error)
+                classify_pdf_failure(input)
             }
         })?;
 
@@ -1020,6 +1020,14 @@ impl Reader for PdfReader {
                 .to_string(),
         );
         Ok(document)
+    }
+}
+
+fn classify_pdf_failure(input: &[u8]) -> ConvertError {
+    // A structurally valid PDF with no extractable text is a scan, not damage.
+    match lopdf::Document::load_mem(input) {
+        Ok(document) if !document.get_pages().is_empty() => ConvertError::ScannedPdf,
+        _ => ConvertError::PdfUnreadable,
     }
 }
 

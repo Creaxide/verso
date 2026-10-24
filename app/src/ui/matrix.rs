@@ -32,7 +32,8 @@ pub fn show(app: &VersoApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
                 .inner_margin(Margin::same(18)),
         )
         .show(ctx, |ui| {
-            ui.set_width(372.0);
+            let columns = Format::ALL.len() as f32;
+            ui.set_width(40.0 + 2.0 + columns * (CELL.x + 2.0));
             ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
 
             ui.horizontal(|ui| {
@@ -90,7 +91,7 @@ pub fn show(app: &VersoApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
             ui.add_space(6.0);
             ui.label(
                 RichText::new(
-                    "PDF → CSV is the only pair Verso refuses: a PDF stores positions, not columns.",
+                    "PDF → CSV is refused: a PDF stores positions, not columns. Document ↔ image pairs arrive in the next stage.",
                 )
                 .font(theme::body(9.5))
                 .color(app.palette.muted),

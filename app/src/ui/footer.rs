@@ -159,6 +159,11 @@ fn batch_pair(app: &VersoApp) -> String {
 fn hint_line(app: &VersoApp) -> String {
     if app.is_busy() {
         let seconds = app.job_elapsed().as_secs_f32();
+        if let Some((done, total)) = app.page_progress {
+            return format!(
+                "Page {done} of {total} · {seconds:.1} s · Esc stops after the current file"
+            );
+        }
         return format!("{seconds:.1} s · Esc stops after the current file");
     }
     if let Some(summary) = &app.batch_summary {

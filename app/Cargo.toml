@@ -16,3 +16,4 @@ verso-core.workspace = true
 eframe.workspace = true
 rayon.workspace = true
 rfd.workspace = true
+zip.workspace = true

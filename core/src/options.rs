@@ -65,6 +65,78 @@ pub struct Options {
     /// Inline image bytes up to this size in JSON output; larger images are
     /// represented by their alt text only.
     pub image_data_limit: usize,
+    /// Image conversion options.
+    pub image: ImageOptions,
+    /// Stem used to name generated files (set by the app per input). `None`
+    /// lets the converter choose a neutral name.
+    pub output_stem: Option<String>,
+}
+
+/// Page sizing for image → PDF output.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ImagePageSize {
+    /// The PDF page is exactly the image's pixel size at 96 DPI.
+    #[default]
+    MatchImage,
+    A4,
+    Letter,
+    Legal,
+}
+
+impl ImagePageSize {
+    pub const ALL: [ImagePageSize; 4] = [
+        ImagePageSize::MatchImage,
+        ImagePageSize::A4,
+        ImagePageSize::Letter,
+        ImagePageSize::Legal,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ImagePageSize::MatchImage => "Match image",
+            ImagePageSize::A4 => "A4",
+            ImagePageSize::Letter => "Letter",
+            ImagePageSize::Legal => "Legal",
+        }
+    }
+
+    /// Page size in PostScript points for the fixed sizes.
+    pub const fn points(self) -> Option<(f32, f32)> {
+        match self {
+            ImagePageSize::MatchImage => None,
+            ImagePageSize::A4 => Some((595.28, 841.89)),
+            ImagePageSize::Letter => Some((612.0, 792.0)),
+            ImagePageSize::Legal => Some((612.0, 1008.0)),
+        }
+    }
+}
+
+/// Image conversion options (JPG/WEBP quality, max dimension).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageOptions {
+    /// JPG/WEBP quality 1–100.
+    pub quality: u8,
+    /// Optional max dimension (width or height) for resize, keeping aspect ratio.
+    /// `None` means no resize.
+    pub max_dimension: Option<u32>,
+    /// DPI for PDF → image rasterization.
+    pub dpi: u16,
+    /// Bundle a multi-page PDF → image run into one ZIP instead of a folder.
+    pub bundle_zip: bool,
+    /// Page sizing for image → PDF output.
+    pub page_size: ImagePageSize,
+}
+
+impl Default for ImageOptions {
+    fn default() -> Self {
+        Self {
+            quality: 85,
+            max_dimension: None,
+            dpi: 150,
+            bundle_zip: false,
+            page_size: ImagePageSize::MatchImage,
+        }
+    }
 }
 
 impl Default for Options {
@@ -75,6 +147,8 @@ impl Default for Options {
             max_input_bytes: 64 * 1024 * 1024,
             json_pretty: true,
             image_data_limit: 4 * 1024 * 1024,
+            image: ImageOptions::default(),
+            output_stem: None,
         }
     }
 }

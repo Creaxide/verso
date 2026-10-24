@@ -35,11 +35,11 @@ pub fn show(app: &VersoApp, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
                     } else if app.source.is_empty() {
                         empty(app, ui, actions);
                     } else if let Some(batch) = app.source.batch() {
-                        batch_brief(app, ui, batch);
+                        batch_brief(app, ui, batch, actions);
                     } else if app.source.is_loading() {
                         loading(app, ui);
                     } else {
-                        brief(app, ui);
+                        brief(app, ui, actions);
                     }
                 });
         });
@@ -197,17 +197,189 @@ fn empty(app: &VersoApp, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
 // Pair brief
 // ---------------------------------------------------------------------------
 
-fn brief(app: &VersoApp, ui: &mut egui::Ui) {
+fn brief(app: &VersoApp, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     let Some(from) = app.source_format() else {
         return;
     };
     let pair = pair_info(from, app.target);
     pair_brief(app, ui, pair.support, &pair.notes, None);
 
+    if shows_image_options(app) {
+        ui.add_space(10.0);
+        image_options(app, ui, actions);
+    }
+
     if app.source.file().is_some() {
         ui.add_space(10.0);
         output_plan(app, ui);
     }
+}
+
+fn shows_image_options(app: &VersoApp) -> bool {
+    if app.target.is_image() {
+        return true;
+    }
+    if app.target != Format::Pdf {
+        return false;
+    }
+    if let Some(from) = app.source_format() {
+        return from.is_image();
+    }
+    app.source
+        .batch()
+        .is_some_and(|batch| batch.files.iter().all(|file| file.format.is_image()))
+}
+
+fn image_options(app: &VersoApp, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+    components::eyebrow(ui, "IMAGE OPTIONS", app.palette.muted);
+    let from_pdf = app.source_format() == Some(Format::Pdf);
+    let to_pdf = app.target == Format::Pdf;
+    let batch_images = app
+        .source
+        .batch()
+        .is_some_and(|batch| batch.files.iter().all(|file| file.format.is_image()));
+
+    components::well(ui, &app.palette, |ui| {
+        ui.set_width(ui.available_width());
+
+        if matches!(app.target, Format::Jpg | Format::Webp) {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("QUALITY")
+                        .font(theme::condensed_bold(9.0))
+                        .color(app.palette.muted),
+                );
+                let mut quality = app.options.image.quality;
+                let response = ui.add(
+                    egui::Slider::new(&mut quality, 1..=100)
+                        .show_value(true)
+                        .trailing_fill(true),
+                );
+                if response.changed() {
+                    actions.push(Action::SetImageQuality(quality));
+                }
+            });
+        }
+
+        if from_pdf {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("DPI")
+                        .font(theme::condensed_bold(9.0))
+                        .color(app.palette.muted),
+                );
+                let mut dpi = app.options.image.dpi;
+                let response = ui.add(
+                    egui::Slider::new(&mut dpi, 72..=300)
+                        .show_value(true)
+                        .trailing_fill(true),
+                );
+                if response.changed() {
+                    actions.push(Action::SetDpi(dpi));
+                }
+            });
+            let mut bundle = app.options.image.bundle_zip;
+            if ui
+                .checkbox(&mut bundle, "Bundle pages as one ZIP")
+                .changed()
+            {
+                actions.push(Action::SetBundleZip(bundle));
+            }
+        }
+
+        if !from_pdf {
+            ui.horizontal(|ui| {
+                let mut enabled = app.options.image.max_dimension.is_some();
+                let mut value = app.options.image.max_dimension.unwrap_or(4096);
+                if ui
+                    .checkbox(&mut enabled, "Limit the longest side")
+                    .changed()
+                {
+                    actions.push(Action::SetMaxDimension(if enabled {
+                        Some(value)
+                    } else {
+                        None
+                    }));
+                }
+                if enabled {
+                    let response = ui.add(
+                        egui::DragValue::new(&mut value)
+                            .range(64..=10_000)
+                            .speed(16.0)
+                            .suffix(" px"),
+                    );
+                    if response.changed() {
+                        actions.push(Action::SetMaxDimension(Some(value)));
+                    }
+                }
+            });
+        }
+
+        if to_pdf {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("PAGE SIZE")
+                        .font(theme::condensed_bold(9.0))
+                        .color(app.palette.muted),
+                );
+                let mut page_size = app.options.image.page_size;
+                egui::ComboBox::from_id_salt("image-page-size")
+                    .selected_text(page_size.label())
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for candidate in verso_core::ImagePageSize::ALL {
+                            if ui
+                                .selectable_label(page_size == candidate, candidate.label())
+                                .clicked()
+                            {
+                                page_size = candidate;
+                            }
+                        }
+                    });
+                if page_size != app.options.image.page_size {
+                    actions.push(Action::SetImagePageSize(page_size));
+                }
+            });
+
+            if app.source.is_batch() {
+                let mut combine = app.combine_images;
+                if ui
+                    .checkbox(&mut combine, "Combine all images into one PDF")
+                    .changed()
+                {
+                    actions.push(Action::SetCombineImages(combine));
+                }
+                if !batch_images {
+                    ui.label(
+                        RichText::new("Combining needs image files only.")
+                            .font(theme::body(9.0))
+                            .color(app.palette.amber_ink),
+                    );
+                }
+            }
+        }
+
+        let note = if from_pdf {
+            if app.options.image.bundle_zip {
+                "One ZIP with a PNG/JPG per page, next to the source."
+            } else {
+                "One file per page in a <stem>_pages folder next to the source."
+            }
+        } else if to_pdf {
+            "JPEG data is embedded directly unless a resize is requested."
+        } else if app.target == Format::Gif {
+            "GIF keeps 256 colours. Animated GIFs are read as their first frame."
+        } else if matches!(app.target, Format::Jpg | Format::Bmp) {
+            "Transparency is flattened onto white for this target."
+        } else {
+            "Alpha is kept. JPG and WEBP use the quality setting above."
+        };
+        ui.label(
+            RichText::new(note)
+                .font(theme::body(9.5))
+                .color(app.palette.muted),
+        );
+    });
 }
 
 fn pair_brief(
@@ -371,6 +543,19 @@ fn proof(
         components::stat(ui, "WARNINGS", completed.warnings.len(), &app.palette);
     });
 
+    if completed.outputs.len() > 1 {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!(
+                "{} files written · {}",
+                completed.outputs.len(),
+                shorten_path(&completed.output, 52)
+            ))
+            .font(theme::mono(9.5))
+            .color(app.palette.muted),
+        );
+    }
+
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let open = components::secondary_button(ui, "OPEN FILE", true, &app.palette);
@@ -448,7 +633,12 @@ fn proof(
 // Batch
 // ---------------------------------------------------------------------------
 
-fn batch_brief(app: &VersoApp, ui: &mut egui::Ui, batch: &crate::state::Batch) {
+fn batch_brief(
+    app: &VersoApp,
+    ui: &mut egui::Ui,
+    batch: &crate::state::Batch,
+    actions: &mut Vec<Action>,
+) {
     let unsupported = batch
         .files
         .iter()
@@ -513,14 +703,23 @@ fn batch_brief(app: &VersoApp, ui: &mut egui::Ui, batch: &crate::state::Batch) {
         Some(unsupported),
     );
 
+    if shows_image_options(app) {
+        ui.add_space(10.0);
+        image_options(app, ui, actions);
+    }
+
     ui.add_space(10.0);
     components::eyebrow(ui, "WHERE THEY LAND", app.palette.muted);
     components::well(ui, &app.palette, |ui| {
         ui.set_width(ui.available_width());
         ui.label(
-            RichText::new("Next to each source file")
-                .font(theme::mono(12.0))
-                .color(app.palette.text),
+            RichText::new(if app.combine_images && app.target == Format::Pdf {
+                "One PDF, next to the first image"
+            } else {
+                "Next to each source file"
+            })
+            .font(theme::mono(12.0))
+            .color(app.palette.text),
         );
         ui.label(
             RichText::new("Existing names are never replaced; Verso adds _1, _2, … instead.")

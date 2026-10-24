@@ -13,16 +13,75 @@ use crate::format::Format;
 use crate::matrix::{is_supported, pair_info};
 use crate::options::Options;
 use crate::readers;
+use crate::readers::image::ImageConverter;
+use crate::readers::image_pdf::ImageToPdfConverter;
+use crate::readers::pdf_image::{default_renderer, PdfToImageConverter};
 use crate::traits::{Reader, Writer};
+
+/// One file produced by a conversion. `name` is a relative file name; the app
+/// decides which folder it lands in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputFile {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
 
 /// A conversion between two concrete formats.
 ///
-/// The signature is deliberately the whole contract: bytes in, bytes out, no
+/// The signature is deliberately the whole contract: bytes in, files out, no
 /// file system access, no UI, no hidden state.
 pub trait Converter: Send + Sync {
     fn source(&self) -> Format;
     fn target(&self) -> Format;
-    fn convert(&self, input: &[u8], opts: &Options) -> Result<Vec<u8>, ConvertError>;
+    fn convert(&self, input: &[u8], opts: &Options) -> Result<Vec<OutputFile>, ConvertError>;
+
+    /// Convert, reporting work as it happens. `progress(done, total)` is called
+    /// at least once; multi-page renderers call it once per page.
+    fn convert_with_progress(
+        &self,
+        input: &[u8],
+        opts: &Options,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Vec<OutputFile>, ConvertError> {
+        let files = self.convert(input, opts)?;
+        let total = files.len().max(1);
+        progress(total, total);
+        Ok(files)
+    }
+
+    /// Convert and keep warnings and source statistics. Converters that do not
+    /// need a document model can leave the default in place.
+    fn run(
+        &self,
+        input: &[u8],
+        opts: &Options,
+    ) -> Result<ConversionReport, ConvertError> {
+        let files = self.convert(input, opts)?;
+        Ok(ConversionReport {
+            files,
+            warnings: Vec::new(),
+            summary: DocumentSummary::default(),
+            from: self.source(),
+            to: self.target(),
+        })
+    }
+
+    /// Like [`Converter::run`], but reporting per-page progress.
+    fn run_with_progress(
+        &self,
+        input: &[u8],
+        opts: &Options,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<ConversionReport, ConvertError> {
+        let files = self.convert_with_progress(input, opts, progress)?;
+        Ok(ConversionReport {
+            files,
+            warnings: Vec::new(),
+            summary: DocumentSummary::default(),
+            from: self.source(),
+            to: self.target(),
+        })
+    }
 }
 
 /// The one converter implementation shared by every supported pair.
@@ -35,8 +94,8 @@ pub struct IrConverter {
 /// Everything a finished conversion knows about itself.
 #[derive(Clone, Debug)]
 pub struct ConversionReport {
-    /// The converted file.
-    pub bytes: Vec<u8>,
+    /// The produced files, in order.
+    pub files: Vec<OutputFile>,
     /// Things the reader or writer could not carry, in plain language.
     pub warnings: Vec<String>,
     /// Structure of the parsed source, for the app's preview.
@@ -45,6 +104,21 @@ pub struct ConversionReport {
     pub from: Format,
     /// Format of the produced bytes.
     pub to: Format,
+}
+
+impl ConversionReport {
+    /// The bytes of the first file, or an empty slice for an empty report.
+    pub fn bytes(&self) -> &[u8] {
+        self.files
+            .first()
+            .map(|file| file.bytes.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Total size of every produced file.
+    pub fn total_bytes(&self) -> usize {
+        self.files.iter().map(|file| file.bytes.len()).sum()
+    }
 }
 
 impl Converter for IrConverter {
@@ -56,12 +130,14 @@ impl Converter for IrConverter {
         self.to
     }
 
-    fn convert(&self, input: &[u8], opts: &Options) -> Result<Vec<u8>, ConvertError> {
-        self.run(input, opts).map(|report| report.bytes)
+    fn convert(
+        &self,
+        input: &[u8],
+        opts: &Options,
+    ) -> Result<Vec<OutputFile>, ConvertError> {
+        self.run(input, opts).map(|report| report.files)
     }
-}
 
-impl IrConverter {
     fn run(&self, input: &[u8], opts: &Options) -> Result<ConversionReport, ConvertError> {
         if !is_supported(self.from, self.to) {
             return Err(unsupported(self.from, self.to));
@@ -75,14 +151,31 @@ impl IrConverter {
         let warnings = collect_warnings(self.to, &document);
         let summary = document.summary();
         let bytes = writer_for(self.to).write(&document, opts)?;
+        let name = match opts.output_stem.as_deref() {
+            Some(stem) if !stem.trim().is_empty() => {
+                format!("{}.{}", stem.trim(), self.to.extension())
+            }
+            _ => format!("output.{}", self.to.extension()),
+        };
 
         Ok(ConversionReport {
-            bytes,
+            files: vec![OutputFile { name, bytes }],
             warnings,
             summary,
             from: self.from,
             to: self.to,
         })
+    }
+
+    fn run_with_progress(
+        &self,
+        input: &[u8],
+        opts: &Options,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<ConversionReport, ConvertError> {
+        let report = self.run(input, opts)?;
+        progress(1, 1);
+        Ok(report)
     }
 }
 
@@ -100,10 +193,22 @@ pub fn read_document(
 pub fn registered() -> &'static [Box<dyn Converter>] {
     static REGISTRY: OnceLock<Vec<Box<dyn Converter>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let mut converters: Vec<Box<dyn Converter>> = Vec::with_capacity(64);
+        let mut converters: Vec<Box<dyn Converter>> = Vec::with_capacity(128);
         for from in Format::ALL {
             for to in Format::ALL {
-                if is_supported(from, to) {
+                if !is_supported(from, to) {
+                    continue;
+                }
+                if from == Format::Pdf && matches!(to, Format::Png | Format::Jpg) {
+                    converters.push(Box::new(PdfToImageConverter {
+                        to,
+                        renderer: default_renderer(),
+                    }));
+                } else if from.is_image() && to == Format::Pdf {
+                    converters.push(Box::new(ImageToPdfConverter { from }));
+                } else if from.is_image() && to.is_image() {
+                    converters.push(Box::new(ImageConverter { from, to }));
+                } else {
                     converters.push(Box::new(IrConverter { from, to }));
                 }
             }
@@ -121,13 +226,30 @@ pub fn converter(from: Format, to: Format) -> Result<&'static dyn Converter, Con
         .ok_or_else(|| unsupported(from, to))
 }
 
-/// Convert a file. The shortest path in the API.
+/// Convert a file. The shortest path in the API, for pairs that produce one file.
 pub fn convert(
     from: Format,
     to: Format,
     input: &[u8],
     opts: &Options,
 ) -> Result<Vec<u8>, ConvertError> {
+    let mut files = converter(from, to)?.convert(input, opts)?;
+    if files.len() != 1 {
+        return Err(ConvertError::other(format!(
+            "This pair produced {} files; use convert_files to keep them all.",
+            files.len()
+        )));
+    }
+    Ok(files.remove(0).bytes)
+}
+
+/// Convert and keep every produced file.
+pub fn convert_files(
+    from: Format,
+    to: Format,
+    input: &[u8],
+    opts: &Options,
+) -> Result<Vec<OutputFile>, ConvertError> {
     converter(from, to)?.convert(input, opts)
 }
 
@@ -138,8 +260,18 @@ pub fn convert_report(
     input: &[u8],
     opts: &Options,
 ) -> Result<ConversionReport, ConvertError> {
-    let dialect = IrConverter { from, to };
-    dialect.run(input, opts)
+    converter(from, to)?.run(input, opts)
+}
+
+/// Convert with per-page progress, keeping warnings and statistics.
+pub fn convert_report_with_progress(
+    from: Format,
+    to: Format,
+    input: &[u8],
+    opts: &Options,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<ConversionReport, ConvertError> {
+    converter(from, to)?.run_with_progress(input, opts, progress)
 }
 
 pub fn reader_for(format: Format) -> &'static dyn Reader {
@@ -152,6 +284,11 @@ pub fn reader_for(format: Format) -> &'static dyn Reader {
         Format::Rtf => &readers::rtf::READER,
         Format::Json => &readers::json::READER,
         Format::Csv => &readers::csv::READER,
+        Format::Png => &readers::image::PNG_READER,
+        Format::Jpg => &readers::image::JPG_READER,
+        Format::Webp => &readers::image::WEBP_READER,
+        Format::Bmp => &readers::image::BMP_READER,
+        Format::Gif => &readers::image::GIF_READER,
     }
 }
 
@@ -165,6 +302,11 @@ pub fn writer_for(format: Format) -> &'static dyn Writer {
         Format::Rtf => &readers::rtf::WRITER,
         Format::Json => &readers::json::WRITER,
         Format::Csv => &readers::csv::WRITER,
+        Format::Png => &readers::image::PNG_WRITER,
+        Format::Jpg => &readers::image::JPG_WRITER,
+        Format::Webp => &readers::image::WEBP_WRITER,
+        Format::Bmp => &readers::image::BMP_WRITER,
+        Format::Gif => &readers::image::GIF_WRITER,
     }
 }
 
@@ -226,7 +368,7 @@ mod tests {
             .filter(|(from, to)| is_supported(*from, *to))
             .count();
         assert_eq!(registered().len(), expected);
-        assert_eq!(registered().len(), 63);
+        assert_eq!(registered().len(), 95);
     }
 
     #[test]

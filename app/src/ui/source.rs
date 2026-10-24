@@ -130,8 +130,8 @@ fn empty(app: &VersoApp, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     ui.painter().text(
         egui::pos2(rect.center().x, rect.bottom() - 24.0),
         Align2::CENTER_CENTER,
-        "TXT   MD   HTML   DOCX   PDF   RTF   JSON   CSV",
-        theme::mono(9.5),
+        "TXT  MD  HTML  DOCX  PDF  RTF  JSON  CSV  ·  PNG  JPG  WEBP  BMP  GIF",
+        theme::mono(9.0),
         app.palette.muted,
     );
 
@@ -290,16 +290,33 @@ fn file_header(
     ui.add_space(4.0);
     match &file.inspection {
         Inspection::Ready(preview) => {
-            let summary = preview.summary;
-            ui.horizontal(|ui| {
-                components::stat(ui, "BLOCKS", summary.blocks, &app.palette);
-                ui.add_space(16.0);
-                components::stat(ui, "HEADINGS", summary.headings, &app.palette);
-                ui.add_space(16.0);
-                components::stat(ui, "TABLES", summary.tables, &app.palette);
-                ui.add_space(16.0);
-                components::stat(ui, "WORDS", summary.words, &app.palette);
-            });
+            if let Some(info) = preview.image {
+                let megapixels =
+                    f64::from(info.width) * f64::from(info.height) / 1_000_000.0;
+                ui.horizontal(|ui| {
+                    components::stat(ui, "WIDTH", info.width, &app.palette);
+                    ui.add_space(16.0);
+                    components::stat(ui, "HEIGHT", info.height, &app.palette);
+                    ui.add_space(16.0);
+                    components::stat(
+                        ui,
+                        "MEGAPIXELS",
+                        format!("{megapixels:.1}"),
+                        &app.palette,
+                    );
+                });
+            } else {
+                let summary = preview.summary;
+                ui.horizontal(|ui| {
+                    components::stat(ui, "BLOCKS", summary.blocks, &app.palette);
+                    ui.add_space(16.0);
+                    components::stat(ui, "HEADINGS", summary.headings, &app.palette);
+                    ui.add_space(16.0);
+                    components::stat(ui, "TABLES", summary.tables, &app.palette);
+                    ui.add_space(16.0);
+                    components::stat(ui, "WORDS", summary.words, &app.palette);
+                });
+            }
         }
         Inspection::Pending => {
             ui.label(
@@ -334,13 +351,18 @@ fn file_header(
 
 fn file_body(app: &VersoApp, ui: &mut egui::Ui, file: &crate::state::SourceFile) {
     ui.add_space(2.0);
+    let is_image = file.format.is_image();
     ui.horizontal(|ui| {
-        components::eyebrow(ui, "STRUCTURE", app.palette.muted);
+        components::eyebrow(ui, if is_image { "READOUT" } else { "STRUCTURE" }, app.palette.muted);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new("first 1,600 characters")
-                    .font(theme::medium(9.0))
-                    .color(app.palette.muted),
+                RichText::new(if is_image {
+                    "dimensions"
+                } else {
+                    "first 1,600 characters"
+                })
+                .font(theme::medium(9.0))
+                .color(app.palette.muted),
             );
         });
     });
@@ -518,9 +540,11 @@ fn batch_row(
                     );
                     if let BatchStatus::Done {
                         output,
+                        outputs,
                         bytes,
                         warnings,
                         elapsed_ms,
+                        ..
                     } = &file.status
                     {
                         ui.label(
@@ -533,6 +557,13 @@ fn batch_row(
                             output.display(),
                             elapsed_ms
                         ));
+                        if outputs.len() > 1 {
+                            ui.label(
+                                RichText::new(format!("· {} files", outputs.len()))
+                                    .font(theme::mono(9.0))
+                                    .color(app.palette.muted),
+                            );
+                        }
                         if !warnings.is_empty() {
                             ui.label(
                                 RichText::new(format!(

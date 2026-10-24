@@ -22,8 +22,17 @@ pub enum ConvertError {
     #[error("This PDF has no text layer — it looks like a scan. Run OCR first, then convert again.")]
     ScannedPdf,
 
-    #[error("This PDF is encrypted or damaged and its text could not be read.")]
+    #[error("This PDF is password-protected or damaged and its text could not be read.")]
     PdfUnreadable,
+
+    #[error("This image is {width} × {height} pixels. Verso handles images up to 10,000 px per side and 100 MP.")]
+    ImageTooLarge { width: u32, height: u32 },
+
+    #[error("PDF page rendering is unavailable. {detail}")]
+    PdfRenderUnavailable { detail: String },
+
+    #[error("A page could not be rendered: {detail}")]
+    PdfRender { detail: String },
 
     #[error("The PDF could not be created.")]
     PdfWrite { detail: String },
@@ -58,6 +67,9 @@ impl ConvertError {
             ConvertError::NotThisFormat { .. } => "wrong-format",
             ConvertError::ScannedPdf => "scanned-pdf",
             ConvertError::PdfUnreadable => "pdf-unreadable",
+            ConvertError::ImageTooLarge { .. } => "image-too-large",
+            ConvertError::PdfRenderUnavailable { .. } => "pdf-render-unavailable",
+            ConvertError::PdfRender { .. } => "pdf-render",
             ConvertError::PdfWrite { .. } => "pdf-write",
             ConvertError::Parse { .. } => "parse",
             ConvertError::Encode { .. } => "encode",

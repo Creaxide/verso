@@ -1,5 +1,6 @@
 //! The window's five painted regions.
 
+pub mod confirm;
 pub mod fold;
 pub mod footer;
 pub mod matrix;

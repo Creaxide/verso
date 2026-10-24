@@ -14,10 +14,15 @@ pub enum Format {
     Rtf,
     Json,
     Csv,
+    Png,
+    Jpg,
+    Webp,
+    Bmp,
+    Gif,
 }
 
 impl Format {
-    pub const ALL: [Format; 8] = [
+    pub const ALL: [Format; 13] = [
         Format::Txt,
         Format::Markdown,
         Format::Html,
@@ -26,9 +31,13 @@ impl Format {
         Format::Rtf,
         Format::Json,
         Format::Csv,
+        Format::Png,
+        Format::Jpg,
+        Format::Webp,
+        Format::Bmp,
+        Format::Gif,
     ];
 
-    /// Short uppercase code used in the UI (`TXT`, `MD`, …).
     pub const fn code(self) -> &'static str {
         match self {
             Format::Txt => "TXT",
@@ -39,10 +48,14 @@ impl Format {
             Format::Rtf => "RTF",
             Format::Json => "JSON",
             Format::Csv => "CSV",
+            Format::Png => "PNG",
+            Format::Jpg => "JPG",
+            Format::Webp => "WEBP",
+            Format::Bmp => "BMP",
+            Format::Gif => "GIF",
         }
     }
 
-    /// Human name shown next to the code.
     pub const fn name(self) -> &'static str {
         match self {
             Format::Txt => "Plain text",
@@ -53,10 +66,14 @@ impl Format {
             Format::Rtf => "Rich text",
             Format::Json => "JSON",
             Format::Csv => "CSV table",
+            Format::Png => "PNG image",
+            Format::Jpg => "JPEG image",
+            Format::Webp => "WebP image",
+            Format::Bmp => "BMP image",
+            Format::Gif => "GIF image",
         }
     }
 
-    /// Lowercase extension, without a dot.
     pub const fn extension(self) -> &'static str {
         match self {
             Format::Txt => "txt",
@@ -67,6 +84,11 @@ impl Format {
             Format::Rtf => "rtf",
             Format::Json => "json",
             Format::Csv => "csv",
+            Format::Png => "png",
+            Format::Jpg => "jpg",
+            Format::Webp => "webp",
+            Format::Bmp => "bmp",
+            Format::Gif => "gif",
         }
     }
 
@@ -80,12 +102,33 @@ impl Format {
             Format::Rtf => "application/rtf",
             Format::Json => "application/json",
             Format::Csv => "text/csv",
+            Format::Png => "image/png",
+            Format::Jpg => "image/jpeg",
+            Format::Webp => "image/webp",
+            Format::Bmp => "image/bmp",
+            Format::Gif => "image/gif",
         }
     }
 
     /// Formats whose bytes are not reasonably renderable as text.
     pub const fn is_binary(self) -> bool {
-        matches!(self, Format::Docx | Format::Pdf)
+        matches!(
+            self,
+            Format::Docx | Format::Pdf | Format::Png | Format::Jpg | Format::Webp | Format::Bmp | Format::Gif
+        )
+    }
+
+    /// True for the raster image formats.
+    pub const fn is_image(self) -> bool {
+        matches!(
+            self,
+            Format::Png | Format::Jpg | Format::Webp | Format::Bmp | Format::Gif
+        )
+    }
+
+    /// True when the format can store an alpha channel.
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Format::Png | Format::Webp | Format::Gif)
     }
 
     /// A one-line description of what the format is for, shown in the UI.
@@ -99,6 +142,11 @@ impl Format {
             Format::Rtf => "Rich text with character formatting; no document structure.",
             Format::Json => "Structured export. A lone table becomes an array of objects.",
             Format::Csv => "Delimited table. The first table in the document is exported.",
+            Format::Png => "Lossless raster image with transparency support.",
+            Format::Jpg => "Lossy photographic image; no transparency.",
+            Format::Webp => "Modern web image; lossless or lossy, with transparency.",
+            Format::Bmp => "Uncompressed raster image; no transparency.",
+            Format::Gif => "Indexed-color image; animation uses only the first frame.",
         }
     }
 
@@ -114,6 +162,11 @@ impl Format {
             "rtf" => Some(Format::Rtf),
             "json" => Some(Format::Json),
             "csv" | "tsv" => Some(Format::Csv),
+            "png" => Some(Format::Png),
+            "jpg" | "jpeg" => Some(Format::Jpg),
+            "webp" => Some(Format::Webp),
+            "bmp" => Some(Format::Bmp),
+            "gif" => Some(Format::Gif),
             _ => None,
         }
     }
@@ -145,6 +198,21 @@ impl Format {
                 .any(|window| window == b"word/" || window == b"word\\")
         {
             return Format::Docx;
+        }
+        if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Format::Png;
+        }
+        if head.starts_with(b"\xff\xd8\xff") {
+            return Format::Jpg;
+        }
+        if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+            return Format::Webp;
+        }
+        if head.starts_with(b"BM") {
+            return Format::Bmp;
+        }
+        if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+            return Format::Gif;
         }
 
         let text = String::from_utf8_lossy(head);
@@ -240,6 +308,11 @@ mod tests {
         assert_eq!(Format::sniff(b"<!doctype html><html></html>"), Format::Html);
         assert_eq!(Format::sniff(br#"{"a": 1}"#), Format::Json);
         assert_eq!(Format::sniff(b"a,b,c\n1,2,3\n"), Format::Csv);
+        assert_eq!(Format::sniff(b"\x89PNG\r\n\x1a\n"), Format::Png);
+        assert_eq!(Format::sniff(b"\xff\xd8\xff\xe0"), Format::Jpg);
+        assert_eq!(Format::sniff(b"RIFF\x00\x00\x00\x00WEBP"), Format::Webp);
+        assert_eq!(Format::sniff(b"BM\x00\x00\x00\x00"), Format::Bmp);
+        assert_eq!(Format::sniff(b"GIF89a"), Format::Gif);
         assert_eq!(Format::sniff(b"just words"), Format::Txt);
     }
 

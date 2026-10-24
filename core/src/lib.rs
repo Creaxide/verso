@@ -2,7 +2,7 @@
 //!
 //! The core knows nothing about windows, files pickers or themes. It exposes:
 //!
-//! - [`Format`], the eight formats Verso understands;
+//! - [`Format`], the thirteen formats Verso understands;
 //! - [`Document`], the intermediate model every reader produces;
 //! - [`Converter`], the byte-in/byte-out contract, one per supported pair;
 //! - [`convert`] and [`convert_report`], the convenient entry points;
@@ -35,9 +35,13 @@ pub use document::{Align, Block, Document, DocumentSummary, ImageRef, Inline, Li
 pub use error::ConvertError;
 pub use format::Format;
 pub use matrix::{conversion_matrix, is_supported, pair_info, Pair, Support};
-pub use options::{Options, PageSize, PdfOptions};
+pub use options::{ImageOptions, ImagePageSize, Options, PageSize, PdfOptions};
+pub use readers::image::{image_info, ImageInfo, LARGE_IMAGE_PIXELS, LARGE_IMAGE_SIDE};
+pub use readers::image_pdf::{images_to_pdf, ImageInput};
+pub use readers::pdf_image::{PageRenderer, PdfToImageConverter, RenderedPage};
 pub use registry::{
-    convert, convert_report, converter, read_document, registered, ConversionReport, Converter,
+    convert, convert_files, convert_report, convert_report_with_progress, converter, read_document,
+    registered, ConversionReport, Converter, OutputFile,
 };
 pub use traits::{Reader, Writer};
 

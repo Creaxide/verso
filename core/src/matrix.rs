@@ -33,6 +33,11 @@ pub struct Pair {
     pub support: Support,
     /// Risks shown before conversion, in plain language.
     pub notes: Vec<&'static str>,
+    /// True when the produced output can be turned back into the source,
+    /// possibly with a confirmation step (multi-file output).
+    pub reversible: bool,
+    /// True when this pair writes more than one file (PDF → images).
+    pub multi_file_output: bool,
 }
 
 impl Pair {
@@ -41,9 +46,9 @@ impl Pair {
     }
 }
 
-/// The full 8 × 8 matrix, in [`Format::ALL`] order.
+/// The full 13 × 13 matrix, in [`Format::ALL`] order.
 pub fn conversion_matrix() -> Vec<Pair> {
-    let mut pairs = Vec::with_capacity(64);
+    let mut pairs = Vec::with_capacity(Format::ALL.len() * Format::ALL.len());
     for from in Format::ALL {
         for to in Format::ALL {
             pairs.push(pair_info(from, to));
@@ -56,8 +61,8 @@ pub fn pair_info(from: Format, to: Format) -> Pair {
     let mut notes: Vec<&'static str> = Vec::new();
     let mut support = Support::Native;
 
-    // One pair is genuinely impossible. Recovering table structure from a PDF
-    // is guesswork; pretending otherwise is worse than saying no.
+    // One document pair is genuinely impossible. Recovering table structure
+    // from a PDF is guesswork; pretending otherwise is worse than saying no.
     if from == Format::Pdf && to == Format::Csv {
         return Pair {
             from,
@@ -67,6 +72,98 @@ pub fn pair_info(from: Format, to: Format) -> Pair {
                 "A PDF stores positioned text, not table structure, so columns cannot be recovered reliably.",
                 "Use HTML, DOCX or CSV as the source instead.",
             ],
+            reversible: false,
+            multi_file_output: false,
+        };
+    }
+
+    // PDF pages become raster images; one output per page.
+    if from == Format::Pdf && matches!(to, Format::Png | Format::Jpg) {
+        return Pair {
+            from,
+            to,
+            support: Support::Lossy,
+            notes: vec![
+                "Each page is rasterized at the chosen DPI; text stops being selectable and searchable.",
+                "A multi-page PDF writes one file per page, or a single ZIP.",
+                "A scanned or damaged PDF is refused with an explanation rather than written empty.",
+            ],
+            reversible: true,
+            multi_file_output: true,
+        };
+    }
+
+    // Images become PDF pages; this is the reverse of PDF → image.
+    if from.is_image() && to == Format::Pdf {
+        return Pair {
+            from,
+            to,
+            support: Support::Lossy,
+            notes: vec![
+                "One image per page. JPEG data is embedded directly when no resize is requested.",
+                "Page size can match the image, or fit A4/Letter/Legal with margins.",
+                "Transparency is composited over the white page.",
+            ],
+            // PDF → WebP/BMP/GIF does not exist, so only PNG/JPG can turn back.
+            reversible: matches!(from, Format::Png | Format::Jpg),
+            multi_file_output: false,
+        };
+    }
+
+    // Stage 1 supports image ↔ image only. Document → image and image →
+    // document pairs are named here so the matrix never promises a converter
+    // that is not registered.
+    if from.is_image() && !to.is_image() {
+        return Pair {
+            from,
+            to,
+            support: Support::Unsupported,
+            notes: vec![
+                "Images become images in this build. Embedding an image in a document is not available yet.",
+                "Choose PNG, JPG, WEBP, BMP or GIF as the target.",
+            ],
+            reversible: false,
+            multi_file_output: false,
+        };
+    }
+    if !from.is_image() && to.is_image() {
+        return Pair {
+            from,
+            to,
+            support: Support::Unsupported,
+            notes: vec![
+                "Document pages cannot be rasterized in this build.",
+                "Convert the document to PDF first; PDF → image arrives in the next stage.",
+            ],
+            reversible: false,
+            multi_file_output: false,
+        };
+    }
+
+    if from.is_image() && to.is_image() {
+        if from == Format::Gif && to != Format::Gif {
+            support = Support::Lossy;
+            notes.push("Only the first frame of a GIF is used; animation is not preserved.");
+        }
+        if from.has_alpha() && !to.has_alpha() {
+            support = Support::Lossy;
+            notes.push("Transparency is flattened onto white because the target has no alpha channel.");
+        }
+        if to == Format::Gif {
+            support = Support::Lossy;
+            notes.push("GIF output is limited to a 256-colour palette.");
+        }
+        if from == to && matches!(to, Format::Jpg | Format::Webp) {
+            support = Support::Lossy;
+            notes.push("Re-encoding adds another generation of compression.");
+        }
+        return Pair {
+            from,
+            to,
+            support,
+            notes,
+            reversible: true,
+            multi_file_output: false,
         };
     }
 
@@ -108,6 +205,9 @@ pub fn pair_info(from: Format, to: Format) -> Pair {
         to,
         support,
         notes,
+        // PDF → CSV is the one refused reverse; everything else can be turned.
+        reversible: !(from == Format::Csv && to == Format::Pdf),
+        multi_file_output: false,
     }
 }
 
@@ -123,7 +223,7 @@ mod tests {
     #[test]
     fn matrix_has_every_pair_once() {
         let matrix = conversion_matrix();
-        assert_eq!(matrix.len(), 64);
+        assert_eq!(matrix.len(), Format::ALL.len() * Format::ALL.len());
         for from in Format::ALL {
             for to in Format::ALL {
                 assert_eq!(
@@ -135,13 +235,76 @@ mod tests {
     }
 
     #[test]
-    fn pdf_to_csv_is_the_only_unsupported_pair() {
-        let unsupported: Vec<_> = conversion_matrix()
-            .into_iter()
-            .filter(|pair| !pair.is_possible())
-            .map(|pair| (pair.from, pair.to))
-            .collect();
-        assert_eq!(unsupported, vec![(Format::Pdf, Format::Csv)]);
+    fn pdf_to_csv_is_still_refused() {
+        let error = pair_info(Format::Pdf, Format::Csv);
+        assert_eq!(error.support, Support::Unsupported);
+        assert!(!error.notes.is_empty());
+    }
+
+    #[test]
+    fn image_and_document_pairs_are_limited_to_pdf() {
+        for from in Format::ALL {
+            for to in Format::ALL {
+                if from.is_image() != to.is_image() {
+                    let expected = (from == Format::Pdf
+                        && matches!(to, Format::Png | Format::Jpg))
+                        || (from.is_image() && to == Format::Pdf);
+                    assert_eq!(
+                        pair_info(from, to).is_possible(),
+                        expected,
+                        "{from:?} → {to:?} support is wrong"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pdf_to_images_is_marked_multi_file() {
+        for to in [Format::Png, Format::Jpg] {
+            let pair = pair_info(Format::Pdf, to);
+            assert!(pair.is_possible());
+            assert!(pair.multi_file_output, "PDF → {to:?} should be multi-file");
+            assert!(pair.reversible);
+        }
+    }
+
+    #[test]
+    fn reversibility_flag_matches_the_reverse_pair() {
+        for pair in conversion_matrix() {
+            let reverse_possible = pair_info(pair.to, pair.from).is_possible();
+            if pair.reversible {
+                assert!(
+                    pair.is_possible(),
+                    "{} → {} is reversible but unsupported",
+                    pair.from,
+                    pair.to
+                );
+                assert!(
+                    reverse_possible,
+                    "{} → {} is marked reversible but its reverse is not",
+                    pair.from,
+                    pair.to
+                );
+            }
+            if pair.is_possible() && reverse_possible {
+                assert!(
+                    pair.reversible,
+                    "{} → {} has a supported reverse but is marked non-reversible",
+                    pair.from,
+                    pair.to
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_pairs_are_all_registered() {
+        for from in Format::ALL.into_iter().filter(|format| format.is_image()) {
+            for to in Format::ALL.into_iter().filter(|format| format.is_image()) {
+                assert!(is_supported(from, to), "{from:?} → {to:?} should be supported");
+            }
+        }
     }
 
     #[test]

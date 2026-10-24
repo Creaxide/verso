@@ -102,6 +102,8 @@ pub struct Preview {
     pub summary: DocumentSummary,
     pub snippet: String,
     pub truncated: bool,
+    /// Pixel dimensions when the source is a raster image.
+    pub image: Option<verso_core::ImageInfo>,
 }
 
 pub struct Batch {
@@ -167,6 +169,8 @@ pub enum BatchStatus {
     Running,
     Done {
         output: PathBuf,
+        /// Every file this conversion wrote. One for single-file pairs.
+        outputs: Vec<PathBuf>,
         bytes: usize,
         warnings: Vec<String>,
         elapsed_ms: u128,
@@ -218,9 +222,14 @@ pub struct BatchSummary {
 #[derive(Clone)]
 pub struct Completed {
     pub output: PathBuf,
+    /// Every file written by the conversion. Single-file conversions have one
+    /// entry; PDF → images has one per page.
+    pub outputs: Vec<PathBuf>,
     pub source_format: Format,
     pub output_format: Format,
     pub bytes: usize,
+    /// How many files/pages the last run produced, before any ZIP bundling.
+    pub pages: usize,
     pub warnings: Vec<String>,
     pub snippet: String,
     pub truncated: bool,
@@ -310,6 +319,16 @@ pub fn shorten_path(path: &Path, limit: usize) -> String {
 
 /// The target we fall back to when the current one cannot read this source.
 pub fn fallback_target(source: Format) -> Format {
+    if source.is_image() {
+        // Stay inside the image family; same-format conversion is allowed, but
+        // prefer a different extension when one exists.
+        for candidate in [Format::Png, Format::Jpg, Format::Webp, Format::Bmp, Format::Gif] {
+            if candidate != source {
+                return candidate;
+            }
+        }
+        return Format::Png;
+    }
     for candidate in [
         Format::Markdown,
         Format::Txt,

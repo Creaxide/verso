@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Context, Key, KeyboardShortcut, Modifiers};
-use verso_core::{is_supported, pair_info, Format, Options};
+use verso_core::{is_supported, pair_info, Format, ImagePageSize, Options};
 
 use crate::components;
 use crate::{state, theme, ui, worker};
@@ -25,8 +25,9 @@ const SWAP_SHORTCUT: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const MATRIX_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::M);
 
-pub const SUPPORTED_EXTENSIONS: [&str; 10] = [
-    "txt", "md", "markdown", "html", "htm", "docx", "pdf", "rtf", "json", "csv",
+pub const SUPPORTED_EXTENSIONS: [&str; 16] = [
+    "txt", "md", "markdown", "html", "htm", "docx", "pdf", "rtf", "json", "csv", "png", "jpg",
+    "jpeg", "webp", "bmp", "gif",
 ];
 
 /// Things a panel can ask the app to do.
@@ -44,6 +45,17 @@ pub enum Action {
     ToggleMatrix,
     CycleTheme,
     RemoveBatchFile(usize),
+    SetImageQuality(u8),
+    SetMaxDimension(Option<u32>),
+    SetDpi(u16),
+    SetBundleZip(bool),
+    SetImagePageSize(ImagePageSize),
+    SetCombineImages(bool),
+    ConfirmLargeImage,
+    DismissLargeImage,
+    ConfirmSwapCombine,
+    DismissSwapCombine,
+    DismissPdfium,
 }
 
 pub(crate) enum Job {
@@ -80,6 +92,12 @@ pub struct VersoApp {
     pub(crate) matrix_open: bool,
     pub(crate) hover_drop: bool,
     pub(crate) swap_flash: Option<Instant>,
+    pub(crate) large_image_prompt: bool,
+    pub(crate) page_progress: Option<(usize, usize)>,
+    pub(crate) combine_images: bool,
+    pub(crate) swap_combine_prompt: bool,
+    pub(crate) pdfium_prompt: bool,
+    large_image_ack: bool,
 
     worker: Worker,
     generation: u64,
@@ -111,6 +129,12 @@ impl VersoApp {
             matrix_open: false,
             hover_drop: false,
             swap_flash: None,
+            large_image_prompt: false,
+            page_progress: None,
+            combine_images: false,
+            swap_combine_prompt: false,
+            pdfium_prompt: false,
+            large_image_ack: false,
             worker: Worker::new(cc.egui_ctx.clone()),
             generation: 0,
             last_dir: None,
@@ -146,8 +170,14 @@ impl VersoApp {
         }
     }
 
-    /// Known progress for batches; `None` means an indeterminate exposure.
+    /// Known progress for batches and page renders; `None` means an
+    /// indeterminate exposure.
     pub(crate) fn progress(&self) -> Option<f32> {
+        if let Some((done, total)) = self.page_progress {
+            if total > 0 {
+                return Some(done as f32 / total as f32);
+            }
+        }
         match self.job {
             Job::Converting {
                 batch: true,
@@ -172,6 +202,17 @@ impl VersoApp {
         self.source.format()
     }
 
+    /// Dimensions of a single image source that exceed the safe limits.
+    pub(crate) fn source_large_image(&self) -> Option<verso_core::ImageInfo> {
+        match &self.source {
+            SourceState::File(file) => match &file.inspection {
+                Inspection::Ready(preview) => preview.image.filter(|info| info.is_large()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The target cannot be changed while a conversion is running.
     pub(crate) fn can_edit_pair(&self) -> bool {
         !self.is_busy()
@@ -180,6 +221,13 @@ impl VersoApp {
     pub(crate) fn can_convert(&self) -> bool {
         if self.is_busy() || self.source.is_empty() {
             return false;
+        }
+        if self.combine_images && self.target == Format::Pdf {
+            if let SourceState::Batch(batch) = &self.source {
+                if batch.files.iter().any(|file| !file.format.is_image()) {
+                    return false;
+                }
+            }
         }
         match &self.source {
             SourceState::Batch(batch) => batch
@@ -199,6 +247,16 @@ impl VersoApp {
         }
         if self.source.is_empty() {
             return Some("Drop a document first.".to_string());
+        }
+        if self.combine_images && self.target == Format::Pdf {
+            if let SourceState::Batch(batch) = &self.source {
+                if batch.files.iter().any(|file| !file.format.is_image()) {
+                    return Some(
+                        "Combining into one PDF needs images only. Remove the other files, or turn combining off."
+                            .to_string(),
+                    );
+                }
+            }
         }
         if let SourceState::Batch(batch) = &self.source {
             if !batch.files.is_empty() && batch.files.iter().all(|file| file.status.is_done()) {
@@ -231,7 +289,8 @@ impl VersoApp {
             Some(completed) => {
                 let from = completed.output_format;
                 let to = completed.source_format;
-                if is_supported(from, to) {
+                let pair = pair_info(from, to);
+                if pair.is_possible() && pair.reversible {
                     if self.is_busy() {
                         (false, "A job is already running.".to_string())
                     } else {
@@ -241,14 +300,10 @@ impl VersoApp {
                     (
                         false,
                         format!(
-                            "Cannot swap: {} → {} is not supported. {}",
+                            "Cannot swap: {} → {} is not reversible. {}",
                             from.name(),
                             to.name(),
-                            pair_info(from, to)
-                                .notes
-                                .first()
-                                .copied()
-                                .unwrap_or("")
+                            pair.notes.first().copied().unwrap_or("")
                         ),
                     )
                 }
@@ -265,6 +320,20 @@ impl VersoApp {
         let input = self.source.primary_path()?;
         if self.source.is_batch() {
             return None;
+        }
+        let from = self.source_format().unwrap_or(Format::Txt);
+        let stem = input
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("output");
+        if pair_info(from, self.target).multi_file_output {
+            if self.options.image.bundle_zip {
+                return Some(format!("{stem}_pages.zip"));
+            }
+            return Some(format!(
+                "{stem}_pages/{stem}_page-001.{}",
+                self.target.extension()
+            ));
         }
         let path = verso_core::paths::unique_output(input, self.target);
         Some(state::file_name(&path))
@@ -355,6 +424,16 @@ impl VersoApp {
                     self.ensure_target(format);
                     self.notice = match &self.source {
                         SourceState::File(file) => match &file.inspection {
+                            Inspection::Ready(preview) if preview.image.is_some() => {
+                                let info = preview.image.unwrap_or_default();
+                                Notice::Info(format!(
+                                    "{} read · {} × {} px · target {}.",
+                                    name,
+                                    info.width,
+                                    info.height,
+                                    self.target.code()
+                                ))
+                            }
                             Inspection::Ready(preview) => Notice::Info(format!(
                                 "{} read · {} block{} · {} word{} · target {}.",
                                 name,
@@ -369,6 +448,16 @@ impl VersoApp {
                         _ => Notice::Info(format!("{name} read.")),
                     };
                 }
+                Event::PageProgress {
+                    generation,
+                    done,
+                    total,
+                } => {
+                    if generation != self.generation {
+                        continue;
+                    }
+                    self.page_progress = Some((done, total));
+                }
                 Event::Converted {
                     generation,
                     completed,
@@ -377,7 +466,37 @@ impl VersoApp {
                         continue;
                     }
                     self.job = Job::Idle;
+                    self.page_progress = None;
                     self.swap_flash = Some(Instant::now());
+                    if self.combine_images && self.source.is_batch() {
+                        let mut done = 0usize;
+                        if let SourceState::Batch(batch) = &mut self.source {
+                            for file in &mut batch.files {
+                                if !file.status.is_done() {
+                                    file.status = BatchStatus::Done {
+                                        output: completed.output.clone(),
+                                        outputs: completed.outputs.clone(),
+                                        bytes: completed.bytes,
+                                        warnings: completed.warnings.clone(),
+                                        elapsed_ms: completed.elapsed_ms,
+                                    };
+                                    done += 1;
+                                }
+                            }
+                        }
+                        self.batch_summary = Some(BatchSummary {
+                            done,
+                            failed: 0,
+                            skipped: 0,
+                            bytes: completed.bytes as u64,
+                            warnings: completed.warnings.len(),
+                            elapsed_ms: completed.elapsed_ms,
+                            folder: completed
+                                .output
+                                .parent()
+                                .map(std::path::Path::to_path_buf),
+                        });
+                    }
                     self.notice = Notice::Success(format!(
                         "Wrote {} · {} in {} ms.",
                         state::file_name(&completed.output),
@@ -394,11 +513,15 @@ impl VersoApp {
                         continue;
                     }
                     self.job = Job::Idle;
+                    self.page_progress = None;
                     if self.source.is_loading() {
                         self.source = SourceState::Empty;
                     }
                     if let SourceState::Batch(batch) = &mut self.source {
                         batch.reset_running();
+                    }
+                    if message.contains("PDFium") {
+                        self.pdfium_prompt = true;
                     }
                     self.notice = Notice::Error(message);
                 }
@@ -432,6 +555,7 @@ impl VersoApp {
                         continue;
                     }
                     self.job = Job::Idle;
+                    self.page_progress = None;
                     if let SourceState::Batch(batch) = &mut self.source {
                         batch.reset_running();
                     }
@@ -514,6 +638,45 @@ impl VersoApp {
                 Action::ToggleMatrix => self.matrix_open = !self.matrix_open,
                 Action::CycleTheme => self.cycle_theme(ctx),
                 Action::RemoveBatchFile(index) => self.remove_batch_file(index),
+                Action::SetImageQuality(quality) => {
+                    self.options.image.quality = quality.clamp(1, 100);
+                    self.clear_completed();
+                }
+                Action::SetMaxDimension(max) => {
+                    self.options.image.max_dimension = max;
+                    self.clear_completed();
+                }
+                Action::SetDpi(dpi) => {
+                    self.options.image.dpi = dpi.clamp(72, 300);
+                    self.clear_completed();
+                }
+                Action::SetBundleZip(bundle) => {
+                    self.options.image.bundle_zip = bundle;
+                    self.clear_completed();
+                }
+                Action::SetImagePageSize(size) => {
+                    self.options.image.page_size = size;
+                    self.clear_completed();
+                }
+                Action::SetCombineImages(combine) => {
+                    self.combine_images = combine;
+                    self.clear_completed();
+                }
+                Action::ConfirmLargeImage => {
+                    self.large_image_ack = true;
+                    self.large_image_prompt = false;
+                    self.start_convert();
+                }
+                Action::DismissLargeImage => {
+                    self.large_image_prompt = false;
+                    self.notice = Notice::Info("Conversion cancelled.".to_string());
+                }
+                Action::ConfirmSwapCombine => self.complete_swap_combine(),
+                Action::DismissSwapCombine => {
+                    self.swap_combine_prompt = false;
+                    self.notice = Notice::Info("Swap cancelled.".to_string());
+                }
+                Action::DismissPdfium => self.pdfium_prompt = false,
             }
         }
     }
@@ -571,6 +734,10 @@ impl VersoApp {
     fn load_single(&mut self, path: PathBuf) {
         let hint = Format::extension_of(&path).and_then(|ext| Format::from_extension(&ext));
         self.clear_completed();
+        self.large_image_ack = false;
+        self.large_image_prompt = false;
+        self.combine_images = false;
+        self.swap_combine_prompt = false;
         self.source = SourceState::Loading {
             path: path.clone(),
             format: hint,
@@ -606,6 +773,10 @@ impl VersoApp {
         }
         let first = batch.files[0].format;
         self.clear_completed();
+        self.large_image_ack = false;
+        self.large_image_prompt = false;
+        self.combine_images = false;
+        self.swap_combine_prompt = false;
         self.source = SourceState::Batch(batch);
         self.generation += 1;
         self.job = Job::Idle;
@@ -677,6 +848,11 @@ impl VersoApp {
         self.job = Job::Idle;
         self.clear_completed();
         self.batch_summary = None;
+        self.large_image_ack = false;
+        self.large_image_prompt = false;
+        self.combine_images = false;
+        self.swap_combine_prompt = false;
+        self.page_progress = None;
         self.notice = Notice::Info(
             "Drop a document, or press Ctrl+O. Nothing leaves this machine.".to_string(),
         );
@@ -720,6 +896,9 @@ impl VersoApp {
             }
         }
         self.target = target;
+        if target != Format::Pdf {
+            self.combine_images = false;
+        }
         self.clear_completed();
         self.batch_summary = None;
         if let SourceState::Batch(batch) = &mut self.source {
@@ -740,6 +919,55 @@ impl VersoApp {
             return;
         }
 
+        // Large images get an explicit confirmation before they are decoded.
+        if !self.large_image_ack && self.source_large_image().is_some() {
+            self.large_image_prompt = true;
+            return;
+        }
+
+        if self.combine_images && self.target == Format::Pdf {
+            if let SourceState::Batch(batch) = &self.source {
+                let inputs: Vec<BatchInput> = batch
+                    .files
+                    .iter()
+                    .filter(|file| !file.status.is_done())
+                    .map(|file| BatchInput {
+                        path: file.path.clone(),
+                        format: file.format,
+                    })
+                    .collect();
+                if inputs.is_empty() {
+                    self.notice =
+                        Notice::Info("Every image in this batch is already written.".to_string());
+                    return;
+                }
+                let total = inputs.len();
+                if let SourceState::Batch(batch) = &mut self.source {
+                    for file in &mut batch.files {
+                        if !file.status.is_done() {
+                            file.status = BatchStatus::Waiting;
+                        }
+                    }
+                }
+                self.batch_summary = None;
+                self.page_progress = None;
+                self.generation += 1;
+                self.job = Job::Converting {
+                    started: Instant::now(),
+                    batch: true,
+                    total,
+                    done: 0,
+                };
+                self.notice = Notice::Info(format!(
+                    "Combining {total} image{} into one PDF…",
+                    if total == 1 { "" } else { "s" }
+                ));
+                self.worker
+                    .combine(self.generation, inputs, self.options.clone());
+                return;
+            }
+        }
+
         match &self.source {
             SourceState::File(file) => {
                 let job = ConvertJob {
@@ -749,6 +977,7 @@ impl VersoApp {
                     target: self.target,
                 };
                 self.generation += 1;
+                self.page_progress = None;
                 self.job = Job::Converting {
                     started: Instant::now(),
                     batch: false,
@@ -787,6 +1016,7 @@ impl VersoApp {
                 }
                 self.batch_summary = None;
                 self.generation += 1;
+                self.page_progress = None;
                 self.job = Job::Converting {
                     started: Instant::now(),
                     batch: true,
@@ -832,10 +1062,20 @@ impl VersoApp {
         let Some(completed) = self.completed.take() else {
             return;
         };
+        let multi = pair_info(completed.source_format, completed.output_format).multi_file_output;
+        if multi {
+            self.completed = Some(completed);
+            self.swap_combine_prompt = true;
+            self.notice =
+                Notice::Info("Confirm combining the page images into one PDF.".to_string());
+            return;
+        }
         let new_target = completed.source_format;
         let format = completed.output_format;
         self.target = new_target;
         self.batch_summary = None;
+        self.large_image_ack = false;
+        self.large_image_prompt = false;
         self.source = SourceState::Loading {
             path: completed.output.clone(),
             format: Some(format),
@@ -863,8 +1103,64 @@ impl VersoApp {
         );
     }
 
-    fn cycle_theme(&mut self, ctx: &Context) {
-        self.theme = self.theme.next();
+    /// Turn a multi-file proof into a batch of images targeting one PDF.
+    fn complete_swap_combine(&mut self) {
+        self.swap_combine_prompt = false;
+        let Some(completed) = self.completed.take() else {
+            return;
+        };
+        let target = completed.source_format;
+        if !pair_info(completed.output_format, target).reversible {
+            self.completed = Some(completed);
+            self.notice = Notice::Error("That proof cannot be reversed.".to_string());
+            return;
+        }
+        let outputs = match gather_output_paths(&completed) {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.completed = Some(completed);
+                self.notice = Notice::Error(message);
+                return;
+            }
+        };
+
+        let mut batch = Batch::new(Vec::new());
+        for path in outputs {
+            let format = detect_format(&path);
+            if !format.is_image() {
+                continue;
+            }
+            let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            batch.files.push(BatchFile {
+                path,
+                format,
+                size,
+                status: BatchStatus::Waiting,
+            });
+        }
+        if batch.files.is_empty() {
+            self.completed = Some(completed);
+            self.notice =
+                Notice::Error("No images were found in the last output set.".to_string());
+            return;
+        }
+
+        let count = batch.files.len();
+        self.source = SourceState::Batch(batch);
+        self.target = target;
+        self.combine_images = true;
+        self.batch_summary = None;
+        self.clear_completed();
+        self.generation += 1;
+        self.job = Job::Idle;
+        self.page_progress = None;
+        self.notice = Notice::Info(format!(
+            "{count} image{} gathered. Press Convert to combine them into one PDF.",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+
+    fn cycle_theme(&mut self, ctx: &Context) {        self.theme = self.theme.next();
         let dark = match self.theme {
             ThemeChoice::Auto => ctx
                 .system_theme()
@@ -964,6 +1260,9 @@ impl eframe::App for VersoApp {
         ui::source::show(self, ui, &mut actions);
         ui::fold::show(self, ui, &mut actions);
         ui::target::show(self, ui, &mut actions);
+        ui::confirm::show(self, &ctx, &mut actions);
+        ui::confirm::swap_prompt(self, &ctx, &mut actions);
+        ui::confirm::pdfium_prompt(self, &ctx, &mut actions);
         ui::matrix::show(self, &ctx, &mut actions);
 
         self.paint_drop_overlay(ui);
@@ -1015,6 +1314,44 @@ fn is_supported_file(path: &Path) -> bool {
     Format::extension_of(path)
         .and_then(|extension| Format::from_extension(&extension))
         .is_some()
+}
+
+/// The exact files from the last conversion, never a folder scan for anything
+/// else: multi-file outputs, a ZIP, a folder, or the single file.
+fn gather_output_paths(completed: &state::Completed) -> Result<Vec<PathBuf>, String> {
+    if completed.outputs.len() > 1 {
+        return Ok(completed.outputs.clone());
+    }
+    let Some(path) = completed
+        .outputs
+        .first()
+        .cloned()
+        .or_else(|| Some(completed.output.clone()))
+    else {
+        return Ok(Vec::new());
+    };
+
+    if path.is_dir() {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(&path)
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate.is_file()
+                    && Format::extension_of(candidate)
+                        .and_then(|extension| Format::from_extension(&extension))
+                        .is_some_and(Format::is_image)
+            })
+            .collect();
+        found.sort();
+        return Ok(found);
+    }
+
+    if Format::extension_of(&path).as_deref() == Some("zip") {
+        return worker::extract_pages(&path);
+    }
+
+    Ok(vec![path])
 }
 
 /// Extension first, then a small content sniff for extensionless files.
