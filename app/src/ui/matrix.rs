@@ -19,24 +19,11 @@ pub fn show(app: &VersoApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
         return;
     }
 
-    // Dim what is behind without pretending the window is a new page.
-    egui::Area::new(egui::Id::unique("matrix-dim"))
-        .order(egui::Order::Middle)
-        .fixed_pos(ctx.content_rect().min)
-        .show(ctx, |ui| {
-            let (rect, _) = ui.allocate_exact_size(
-                ctx.content_rect().size(),
-                Sense::hover(),
-            );
-            ui.painter()
-                .rect_filled(rect, CornerRadius::ZERO, egui::Color32::from_black_alpha(96));
-        });
-
-    egui::Window::new("format-matrix")
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+    // A modal, not a window over a hand-made dim sheet: egui's modal keeps the
+    // backdrop and the sheet in one layer, so the backdrop can swallow a click
+    // outside without eating clicks meant for the matrix itself.
+    let modal = egui::Modal::new(egui::Id::unique("format-matrix"))
+        .backdrop_color(egui::Color32::from_black_alpha(96))
         .frame(
             egui::Frame::new()
                 .fill(app.palette.leaf)
@@ -122,6 +109,10 @@ pub fn show(app: &VersoApp, ctx: &egui::Context, actions: &mut Vec<Action>) {
                 .color(app.palette.muted),
             );
         });
+
+    if modal.backdrop_response.clicked() {
+        actions.push(Action::ToggleMatrix);
+    }
 }
 
 fn header_cell(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
